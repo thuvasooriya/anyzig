@@ -101,9 +101,8 @@ pub fn build(b: *std.Build) !void {
         .optimize = .Debug,
     });
 
-    const ci_step = b.step("ci", "The build/test step to run on the CI");
+    const ci_step = b.step("ci", "Build release artifacts for CI");
     ci_step.dependOn(b.getInstallStep());
-    ci_step.dependOn(test_step);
     ci_step.dependOn(&install_version_release_file.step);
 
     try ci(b, &release_version, release_version_embed, zig_mod, ci_step, host_zip_exe);

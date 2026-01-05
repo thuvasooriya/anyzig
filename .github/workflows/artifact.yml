@@ -3,7 +3,7 @@ on:
   pull_request:
   workflow_dispatch:
   push:
-    branches: [main]
+    tags: ['v*']
 
 jobs:
   build:
@@ -36,7 +36,6 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -51,8 +50,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
-          gh release create "$VERSION" \
-            --title "anyzig $VERSION" \
+          gh release create "${{ github.ref_name }}" \
+            --title "anyzig ${{ github.ref_name }}" \
             --generate-notes \
             artifacts/*

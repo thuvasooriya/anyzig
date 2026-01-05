@@ -1,6 +1,7 @@
 # anyzig
 
-> [!NOTE] Additions in this fork
+> [!NOTE]
+> Additions in this fork
 >
 > - **ZLS support**: Run `zls` via anyzig - auto-resolves compatible ZLS version for your Zig version
 > - **Default version**: `zig any set-default VERSION` for fallback when no `build.zig.zon` present
