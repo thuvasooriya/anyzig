@@ -98,9 +98,12 @@ pub fn allocReverseLookup(
     var map: ReverseLookup = .{};
     var it = dir.iterate();
     const prefix = anyzig.exe_str ++ "-";
+    const compat_prefix = anyzig.exe_str ++ "-compat-";
     while (try it.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        // Skip compat mapping files (e.g., zls-compat-0.15.2)
+        if (std.mem.startsWith(u8, entry.name, compat_prefix)) continue;
         const version_str = entry.name[prefix.len..];
         const entry_version = anyzig.SemanticVersion.parse(version_str) orelse std.debug.panic(
             "entry '{s}' contains an invalid version '{s}'",

@@ -104,6 +104,35 @@ fn readVerbosityFile() union(enum) {
     );
 }
 
+const default_version_filename = "default-" ++ exe_str ++ "-version";
+
+fn readDefaultVersionFile() ?VersionSpecifier {
+    const app_data_dir = global.getAppDataDir() catch return null;
+    const default_version_path = std.fs.path.join(global.arena, &.{ app_data_dir, default_version_filename }) catch |e| oom(e);
+    defer global.arena.free(default_version_path);
+    const content = read_file: {
+        const file = std.fs.cwd().openFile(default_version_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| std.debug.panic("open '{s}' failed with {s}", .{ default_version_path, @errorName(e) }),
+        };
+        defer file.close();
+        break :read_file file.readToEndAlloc(global.arena, std.math.maxInt(usize)) catch |err| std.debug.panic(
+            "read '{s}' failed with {s}",
+            .{ default_version_path, @errorName(err) },
+        );
+    };
+    defer global.arena.free(content);
+    const content_trimmed = std.mem.trimRight(u8, content, &std.ascii.whitespace);
+    return VersionSpecifier.parse(content_trimmed) orelse {
+        std.debug.panic(
+            "file '{s}' had invalid version content:\n" ++
+                "---\n{s}\n---\n" ++
+                "expected a valid version like '0.13.0' or 'master'",
+            .{ default_version_path, content },
+        );
+    };
+}
+
 fn anyzigLog(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -365,15 +394,20 @@ pub fn main() !void {
             if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1));
         }
         if (manual_version) |version| break :blk .{ version, false };
-        const build_root = try findBuildRoot(arena, build_root_options) orelse {
-            try std.io.getStdErr().writeAll(
-                "no build.zig to pull a zig version from, you can:\n" ++
-                    "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
-                    "  2. run from a directory where a build.zig can be found\n",
-            );
-            std.process.exit(0xff);
-        };
-        break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+        if (try findBuildRoot(arena, build_root_options)) |build_root| {
+            break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+        }
+        if (readDefaultVersionFile()) |default_version| {
+            log.info("using default version from config", .{});
+            break :blk .{ default_version, false };
+        }
+        try std.io.getStdErr().writeAll(
+            "no build.zig to pull a zig version from, you can:\n" ++
+                "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
+                "  2. run from a directory where a build.zig can be found\n" ++
+                "  3. run '" ++ exe_str ++ " any set-default VERSION' to set a default version\n",
+        );
+        std.process.exit(0xff);
     };
 
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
@@ -405,7 +439,13 @@ pub fn main() !void {
     // no need to free
     try hashstore.init(hashstore_path);
 
-    const hashstore_name = std.fmt.allocPrint(arena, exe_str ++ "-{}", .{semantic_version}) catch |e| oom(e);
+    // For ZLS, resolve the compatible version from zig version
+    const resolved_version: SemanticVersion, const zls_compat_info: ?ZlsCompatInfo = switch (build_options.exe) {
+        .zig => .{ semantic_version, null },
+        .zls => try resolveZlsVersion(arena, hashstore_path, semantic_version),
+    };
+
+    const hashstore_name = std.fmt.allocPrint(arena, exe_str ++ "-{}", .{resolved_version}) catch |e| oom(e);
     // no need to free
 
     const maybe_hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name));
@@ -434,7 +474,7 @@ pub fn main() !void {
             }
         }
 
-        const url = try getVersionUrl(arena, app_data_path, semantic_version);
+        const url = try getVersionUrl(arena, app_data_path, resolved_version, zls_compat_info);
         defer url.deinit(arena);
         const hash = hashAndPath(try cmdFetch(
             gpa,
@@ -545,10 +585,14 @@ fn anyCommandUsage() !u8 {
     try std.io.getStdErr().writer().print(
         "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
-            "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
-            "                                 | accepts 'warn' or 'debug\n" ++
-            "  zig any version                | print the version of anyzig to stdout\n" ++
-            "  zig any list-installed         | list all versions of zig installed in the global cache\n",
+            "  " ++ exe_str ++ " any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
+            "                                 | accepts 'warn' or 'debug'\n" ++
+            "  " ++ exe_str ++ " any set-default VERSION    | sets the default " ++ exe_str ++ " version to use when no\n" ++
+            "                                 | build.zig.zon is found (e.g. '0.13.0'" ++ (if (build_options.exe == .zig) ", 'master'" else "") ++ ")\n" ++
+            "  " ++ exe_str ++ " any unset-default          | removes the default " ++ exe_str ++ " version\n" ++
+            "  " ++ exe_str ++ " any version                | print the version of anyzig to stdout\n" ++
+            "  " ++ exe_str ++ " any list-installed         | list all versions of " ++ exe_str ++ " installed in the global cache\n" ++
+            "  " ++ exe_str ++ " any remove VERSION         | remove a specific " ++ exe_str ++ " version from the global cache\n",
         .{@embedFile("version")},
     );
     return 0xff;
@@ -598,7 +642,58 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
         if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
         try listInstalled();
         return 0;
-    } else errExit("unknown zig any '{s}' command", .{command});
+    } else if (std.mem.eql(u8, command, "set-default")) {
+        if (arg_offset >= cmdline.len()) errExit("missing VERSION (e.g. '0.13.0' or 'master')", .{});
+        if (arg_offset + 1 < cmdline.len()) errExit("too many cmdline args", .{});
+        const version_str = cmdline.arg(arg_offset);
+        _ = VersionSpecifier.parse(version_str) orelse {
+            errExit("invalid VERSION '{s}', expected a version like '0.13.0' or 'master'", .{version_str});
+        };
+        {
+            const app_data_dir = try global.getAppDataDir();
+            const default_version_path = std.fs.path.join(
+                global.arena,
+                &.{ app_data_dir, default_version_filename },
+            ) catch |e| oom(e);
+            defer global.arena.free(default_version_path);
+            if (std.fs.path.dirname(default_version_path)) |dir| {
+                try std.fs.cwd().makePath(dir);
+            }
+            const file = try std.fs.cwd().createFile(default_version_path, .{});
+            defer file.close();
+            try file.writer().print("{s}\n", .{version_str});
+        }
+        const saved = readDefaultVersionFile() orelse @panic("no file after writing it?");
+        _ = saved;
+        try std.io.getStdOut().writer().print("default version set to '{s}'\n", .{version_str});
+        return 0;
+    } else if (std.mem.eql(u8, command, "unset-default")) {
+        if (arg_offset < cmdline.len()) errExit("the 'unset-default' subcommand does not take any cmdline args", .{});
+        const app_data_dir = try global.getAppDataDir();
+        const default_version_path = std.fs.path.join(
+            global.arena,
+            &.{ app_data_dir, default_version_filename },
+        ) catch |e| oom(e);
+        defer global.arena.free(default_version_path);
+        std.fs.cwd().deleteFile(default_version_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.io.getStdOut().writeAll("no default version was set\n");
+                return 0;
+            },
+            else => |e| return e,
+        };
+        try std.io.getStdOut().writeAll("default version removed\n");
+        return 0;
+    } else if (std.mem.eql(u8, command, "remove")) {
+        if (arg_offset >= cmdline.len()) errExit("missing VERSION to remove (e.g. '0.13.0')", .{});
+        if (arg_offset + 1 < cmdline.len()) errExit("too many cmdline args", .{});
+        const version_str = cmdline.arg(arg_offset);
+        const version = SemanticVersion.parse(version_str) orelse {
+            errExit("invalid VERSION '{s}', expected a version like '0.13.0'", .{version_str});
+        };
+        try removeVersion(version);
+        return 0;
+    } else errExit("unknown " ++ exe_str ++ " any '{s}' command", .{command});
 }
 
 fn listInstalled() !void {
@@ -684,6 +779,42 @@ fn listInstalled() !void {
 fn listVersion(p_path: []const u8, version: SemanticVersion, hash: []const u8) !void {
     const stdout = io.getStdOut().writer();
     try stdout.print("{}\t{s}{s}{s}\n", .{ version, p_path, std.fs.path.sep_str, hash });
+}
+
+fn removeVersion(version: SemanticVersion) !void {
+    const app_data_dir = try global.getAppDataDir();
+    const hashstore_path = try std.fs.path.join(global.arena, &.{ app_data_dir, "hashstore" });
+
+    const hashstore_name = std.fmt.allocPrint(global.arena, exe_str ++ "-{}", .{version}) catch |e| oom(e);
+    defer global.arena.free(hashstore_name);
+
+    const maybe_hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name));
+    if (maybe_hash == null) {
+        try std.io.getStdErr().writer().print("version {} is not installed\n", .{version});
+        std.process.exit(1);
+    }
+    const hash = maybe_hash.?;
+
+    const override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(global.arena);
+    const global_cache_dir_path = override_global_cache_dir orelse try introspect.resolveGlobalCacheDir(global.arena);
+    const version_path = std.fs.path.join(global.arena, &.{ global_cache_dir_path, hash.path() }) catch |e| oom(e);
+    defer global.arena.free(version_path);
+
+    var dir = std.fs.cwd().openDir(version_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            log.warn("directory '{s}' not found, cleaning up hashstore entry", .{version_path});
+            try hashstore.delete(hashstore_path, hashstore_name);
+            try std.io.getStdOut().writer().print("removed {} (directory was already missing)\n", .{version});
+            return;
+        },
+        else => |e| return e,
+    };
+    dir.close();
+
+    try std.fs.cwd().deleteTree(version_path);
+    try hashstore.delete(hashstore_path, hashstore_name);
+
+    try std.io.getStdOut().writer().print("removed {} from {s}\n", .{ version, version_path });
 }
 
 pub const SemanticVersion = struct {
@@ -873,16 +1004,155 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
     };
 }
 
+const ZlsCompatInfo = struct {
+    zig_version: SemanticVersion,
+    tarball_url: []const u8,
+};
+
+fn resolveZlsVersion(
+    arena: Allocator,
+    hashstore_path: []const u8,
+    zig_version: SemanticVersion,
+) !struct { SemanticVersion, ?ZlsCompatInfo } {
+    // Check if we have a cached zig->zls version mapping
+    const compat_name = std.fmt.allocPrint(arena, "zls-compat-{}", .{zig_version}) catch |e| oom(e);
+    defer arena.free(compat_name);
+
+    // Try to read cached compatible ZLS version
+    if (try hashstore.find(hashstore_path, compat_name)) |_| {
+        // Read the actual version string from the compat file
+        const compat_path = std.fs.path.join(arena, &.{ hashstore_path, compat_name }) catch |e| oom(e);
+        defer arena.free(compat_path);
+
+        const compat_content = blk: {
+            const file = std.fs.cwd().openFile(compat_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :blk null,
+                else => |e| return e,
+            };
+            defer file.close();
+            break :blk try file.readToEndAlloc(arena, 1024);
+        };
+
+        if (compat_content) |content| {
+            defer arena.free(content);
+            const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+            if (SemanticVersion.parse(trimmed)) |zls_version| {
+                // Check if we already have this ZLS version installed
+                const zls_hashstore_name = std.fmt.allocPrint(arena, "zls-{}", .{zls_version}) catch |e| oom(e);
+                defer arena.free(zls_hashstore_name);
+
+                if (try hashstore.find(hashstore_path, zls_hashstore_name)) |_| {
+                    log.info("using cached ZLS {} for Zig {} ", .{ zls_version, zig_version });
+                    return .{ zls_version, null };
+                }
+            }
+        }
+    }
+
+    // Need to fetch from API
+    log.info("resolving ZLS version for Zig {}...", .{zig_version});
+    const api_result = try fetchZlsCompatVersion(arena, zig_version);
+
+    // Cache the zig->zls version mapping
+    const compat_path = std.fs.path.join(arena, &.{ hashstore_path, compat_name }) catch |e| oom(e);
+    defer arena.free(compat_path);
+    {
+        const file = try std.fs.cwd().createFile(compat_path, .{});
+        defer file.close();
+        try file.writer().print("{}\n", .{api_result.zls_version});
+    }
+
+    log.info("ZLS {} is compatible with Zig {}", .{ api_result.zls_version, zig_version });
+    return .{ api_result.zls_version, .{
+        .zig_version = zig_version,
+        .tarball_url = api_result.tarball_url,
+    } };
+}
+
+const ZlsApiResult = struct {
+    zls_version: SemanticVersion,
+    tarball_url: []const u8,
+};
+
+fn fetchZlsCompatVersion(arena: Allocator, zig_version: SemanticVersion) !ZlsApiResult {
+    const url_string = std.fmt.allocPrint(
+        arena,
+        "https://releases.zigtools.org/v1/zls/select-version?zig_version={}&compatibility=only-runtime",
+        .{zig_version},
+    ) catch |e| oom(e);
+    defer arena.free(url_string);
+
+    const uri = std.Uri.parse(url_string) catch unreachable;
+
+    var client = std.http.Client{ .allocator = arena };
+    defer client.deinit();
+
+    var header_buffer: [4096]u8 = undefined;
+    var request = client.open(.GET, uri, .{
+        .server_header_buffer = &header_buffer,
+        .keep_alive = false,
+    }) catch |e| errExit("ZLS API connect failed: {s}", .{@errorName(e)});
+    defer request.deinit();
+
+    request.send() catch |e| errExit("ZLS API send failed: {s}", .{@errorName(e)});
+    request.wait() catch |e| errExit("ZLS API wait failed: {s}", .{@errorName(e)});
+
+    if (request.response.status != .ok) {
+        errExit("ZLS API returned HTTP {}", .{@intFromEnum(request.response.status)});
+    }
+
+    const body = request.reader().readAllAlloc(arena, std.math.maxInt(usize)) catch |e|
+        errExit("ZLS API read failed: {s}", .{@errorName(e)});
+    defer arena.free(body);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, body, .{
+        .allocate = .alloc_if_needed,
+    }) catch |e| errExit("ZLS API JSON parse failed: {s}", .{@errorName(e)});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+
+    // Check for error message
+    if (root.get("message")) |msg| {
+        errExit("ZLS API: {s}", .{msg.string});
+    }
+
+    // Get version
+    const version_str = (root.get("version") orelse
+        errExit("ZLS API response missing 'version' field", .{})).string;
+    const zls_version = SemanticVersion.parse(version_str) orelse
+        errExit("ZLS API returned invalid version: {s}", .{version_str});
+
+    // Get tarball URL for our platform
+    const platform_obj = root.get(arch_os) orelse
+        errExit("ZLS API has no build for platform {s}", .{arch_os});
+    const tarball_url = (platform_obj.object.get("tarball") orelse
+        errExit("ZLS API response missing 'tarball' field for {s}", .{arch_os})).string;
+
+    return .{
+        .zls_version = zls_version,
+        .tarball_url = arena.dupe(u8, tarball_url) catch |e| oom(e),
+    };
+}
+
 fn getVersionUrl(
     arena: Allocator,
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
+    zls_compat_info: ?ZlsCompatInfo,
 ) !DownloadUrl {
-    if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
-        arena,
-        "https://builds.zigtools.org/zls-{s}-{}.{s}",
-        .{ os_arch, semantic_version, archive_ext },
-    ) catch |e| oom(e));
+    if (build_options.exe == .zls) {
+        // If we have compat info from API, use the tarball URL directly
+        if (zls_compat_info) |info| {
+            return DownloadUrl.initOfficial(arena.dupe(u8, info.tarball_url) catch |e| oom(e));
+        }
+        // Fallback: construct URL (for cached versions)
+        return DownloadUrl.initOfficial(std.fmt.allocPrint(
+            arena,
+            "https://builds.zigtools.org/zls-{s}-{}.{s}",
+            .{ arch_os, semantic_version, archive_ext },
+        ) catch |e| oom(e));
+    }
 
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
 

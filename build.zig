@@ -695,8 +695,7 @@ fn makeCiArchiveStep(
 ) *std.Build.Step {
     const install_path = b.getInstallPath(.prefix, ".");
 
-    // not sure yet if we want to include zls.exe in our archives?
-    const include_zls = false;
+    const include_zls = true;
 
     if (target.os.tag == .windows) {
         const out_zip_file = b.pathJoin(&.{
