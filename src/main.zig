@@ -53,6 +53,13 @@ const global = struct {
 
     fn getAppDataDir() ![]const u8 {
         if (cached_app_data_dir == null) {
+            // Allow overriding the config directory for testing
+            if (std.posix.getenv("ANYZIG_CONFIG_DIR")) |config_dir| {
+                if (config_dir.len > 0) {
+                    cached_app_data_dir = .{ .ok = config_dir };
+                    return config_dir;
+                }
+            }
             cached_app_data_dir = if (std.fs.getAppDataDir(arena, "anyzig")) |dir|
                 .{ .ok = dir }
             else |e|
@@ -96,12 +103,14 @@ fn readVerbosityFile() union(enum) {
     const content_trimmed = std.mem.trimRight(u8, content, &std.ascii.whitespace);
     if (std.mem.eql(u8, content_trimmed, "debug")) return .{ .loaded_from_file = .debug };
     if (std.mem.eql(u8, content_trimmed, "warn")) return .{ .loaded_from_file = .warn };
-    std.debug.panic(
-        "file '{s}' had the following unexpected content:\n" ++
+    if (content_trimmed.len == 0) return .no_file; // empty file treated as absent
+    log.warn(
+        "file '{s}' had unexpected content, ignoring:\n" ++
             "---\n{s}\n---\n" ++
-            "we currently only expect the content to be 'debug' or 'warn'",
+            "expected 'debug' or 'warn'",
         .{ verbosity_path, content },
     );
+    return .no_file;
 }
 
 const default_version_filename = "default-" ++ exe_str ++ "-version";
@@ -385,8 +394,15 @@ pub fn main() !void {
                 };
 
                 if (manual_version) |version| break :blk .{ version, !is_help };
+                // Fall back to default version for init commands
+                if (readDefaultVersionFile()) |default_version| {
+                    log.info("using default version from config for init", .{});
+                    break :blk .{ default_version, !is_help };
+                }
                 try std.io.getStdErr().writer().print(
-                    "error: anyzig init requires a version, i.e. 'zig 0.13.0 {s}'\n",
+                    "error: anyzig init requires a version, you can:\n" ++
+                        "  1. specify one explicitly: '" ++ exe_str ++ " 0.13.0 {s}'\n" ++
+                        "  2. set a default: '" ++ exe_str ++ " any set-default VERSION'\n",
                     .{command},
                 );
                 std.process.exit(0xff);
@@ -589,6 +605,7 @@ fn anyCommandUsage() !u8 {
             "                                 | accepts 'warn' or 'debug'\n" ++
             "  " ++ exe_str ++ " any set-default VERSION    | sets the default " ++ exe_str ++ " version to use when no\n" ++
             "                                 | build.zig.zon is found (e.g. '0.13.0'" ++ (if (build_options.exe == .zig) ", 'master'" else "") ++ ")\n" ++
+            "  " ++ exe_str ++ " any show-default           | shows the current default " ++ exe_str ++ " version\n" ++
             "  " ++ exe_str ++ " any unset-default          | removes the default " ++ exe_str ++ " version\n" ++
             "  " ++ exe_str ++ " any version                | print the version of anyzig to stdout\n" ++
             "  " ++ exe_str ++ " any list-installed         | list all versions of " ++ exe_str ++ " installed in the global cache\n" ++
@@ -664,7 +681,16 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
             try file.writer().print("{s}\n", .{version_str});
         }
         const saved = readDefaultVersionFile() orelse @panic("no file after writing it?");
-        _ = saved;
+        const expected = VersionSpecifier.parse(version_str).?;
+        switch (expected) {
+            .master => std.debug.assert(saved == .master),
+            .semantic => |exp_ver| {
+                switch (saved) {
+                    .master => @panic("saved master but expected semantic version"),
+                    .semantic => |saved_ver| std.debug.assert(saved_ver.eql(exp_ver)),
+                }
+            },
+        }
         try std.io.getStdOut().writer().print("default version set to '{s}'\n", .{version_str});
         return 0;
     } else if (std.mem.eql(u8, command, "unset-default")) {
@@ -683,6 +709,17 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
             else => |e| return e,
         };
         try std.io.getStdOut().writeAll("default version removed\n");
+        return 0;
+    } else if (std.mem.eql(u8, command, "show-default")) {
+        if (arg_offset < cmdline.len()) errExit("the 'show-default' subcommand does not take any cmdline args", .{});
+        if (readDefaultVersionFile()) |version| {
+            switch (version) {
+                .master => try std.io.getStdOut().writeAll("master\n"),
+                .semantic => |v| try std.io.getStdOut().writer().print("{}\n", .{v}),
+            }
+        } else {
+            try std.io.getStdOut().writeAll("no default version set\n");
+        }
         return 0;
     } else if (std.mem.eql(u8, command, "remove")) {
         if (arg_offset >= cmdline.len()) errExit("missing VERSION to remove (e.g. '0.13.0')", .{});
@@ -800,17 +837,7 @@ fn removeVersion(version: SemanticVersion) !void {
     const version_path = std.fs.path.join(global.arena, &.{ global_cache_dir_path, hash.path() }) catch |e| oom(e);
     defer global.arena.free(version_path);
 
-    var dir = std.fs.cwd().openDir(version_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            log.warn("directory '{s}' not found, cleaning up hashstore entry", .{version_path});
-            try hashstore.delete(hashstore_path, hashstore_name);
-            try std.io.getStdOut().writer().print("removed {} (directory was already missing)\n", .{version});
-            return;
-        },
-        else => |e| return e,
-    };
-    dir.close();
-
+    // deleteTree handles non-existent paths gracefully (returns without error)
     try std.fs.cwd().deleteTree(version_path);
     try hashstore.delete(hashstore_path, hashstore_name);
 
@@ -1014,38 +1041,22 @@ fn resolveZlsVersion(
     hashstore_path: []const u8,
     zig_version: SemanticVersion,
 ) !struct { SemanticVersion, ?ZlsCompatInfo } {
-    // Check if we have a cached zig->zls version mapping
     const compat_name = std.fmt.allocPrint(arena, "zls-compat-{}", .{zig_version}) catch |e| oom(e);
     defer arena.free(compat_name);
 
-    // Try to read cached compatible ZLS version
-    if (try hashstore.find(hashstore_path, compat_name)) |_| {
-        // Read the actual version string from the compat file
-        const compat_path = std.fs.path.join(arena, &.{ hashstore_path, compat_name }) catch |e| oom(e);
-        defer arena.free(compat_path);
-
-        const compat_content = blk: {
-            const file = std.fs.cwd().openFile(compat_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => break :blk null,
-                else => |e| return e,
-            };
-            defer file.close();
-            break :blk try file.readToEndAlloc(arena, 1024);
-        };
-
-        if (compat_content) |content| {
-            defer arena.free(content);
-            const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
-            if (SemanticVersion.parse(trimmed)) |zls_version| {
-                // Check if we already have this ZLS version installed
+    // Check cached compat mapping via hashstore API (includes TTL check)
+    if (try hashstore.findCompat(hashstore_path, compat_name, arena)) |compat| {
+        if (!compat.is_expired) {
+            if (SemanticVersion.parse(compat.version_str)) |zls_version| {
                 const zls_hashstore_name = std.fmt.allocPrint(arena, "zls-{}", .{zls_version}) catch |e| oom(e);
                 defer arena.free(zls_hashstore_name);
-
                 if (try hashstore.find(hashstore_path, zls_hashstore_name)) |_| {
-                    log.info("using cached ZLS {} for Zig {} ", .{ zls_version, zig_version });
+                    log.info("using cached ZLS {} for Zig {}", .{ zls_version, zig_version });
                     return .{ zls_version, null };
                 }
             }
+        } else {
+            log.info("cached ZLS compat mapping expired, refreshing...", .{});
         }
     }
 
@@ -1053,14 +1064,9 @@ fn resolveZlsVersion(
     log.info("resolving ZLS version for Zig {}...", .{zig_version});
     const api_result = try fetchZlsCompatVersion(arena, zig_version);
 
-    // Cache the zig->zls version mapping
-    const compat_path = std.fs.path.join(arena, &.{ hashstore_path, compat_name }) catch |e| oom(e);
-    defer arena.free(compat_path);
-    {
-        const file = try std.fs.cwd().createFile(compat_path, .{});
-        defer file.close();
-        try file.writer().print("{}\n", .{api_result.zls_version});
-    }
+    // Cache the zig->zls version mapping with timestamp via hashstore API
+    const version_array = api_result.zls_version.array();
+    try hashstore.saveCompat(hashstore_path, compat_name, version_array.slice());
 
     log.info("ZLS {} is compatible with Zig {}", .{ api_result.zls_version, zig_version });
     return .{ api_result.zls_version, .{
@@ -1072,6 +1078,13 @@ fn resolveZlsVersion(
 const ZlsApiResult = struct {
     zls_version: SemanticVersion,
     tarball_url: []const u8,
+};
+
+const ZlsApiResponse = struct {
+    version: []const u8 = "",
+    message: ?[]const u8 = null,
+
+    // Platform-specific fields are parsed separately since the key is runtime-determined
 };
 
 fn fetchZlsCompatVersion(arena: Allocator, zig_version: SemanticVersion) !ZlsApiResult {
@@ -1105,26 +1118,33 @@ fn fetchZlsCompatVersion(arena: Allocator, zig_version: SemanticVersion) !ZlsApi
         errExit("ZLS API read failed: {s}", .{@errorName(e)});
     defer arena.free(body);
 
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, body, .{
+    // Parse the typed top-level fields
+    const parsed = std.json.parseFromSlice(ZlsApiResponse, arena, body, .{
         .allocate = .alloc_if_needed,
+        .ignore_unknown_fields = true,
     }) catch |e| errExit("ZLS API JSON parse failed: {s}", .{@errorName(e)});
     defer parsed.deinit();
 
-    const root = parsed.value.object;
+    const response = parsed.value;
 
-    // Check for error message
-    if (root.get("message")) |msg| {
-        errExit("ZLS API: {s}", .{msg.string});
+    if (response.message) |msg| {
+        errExit("ZLS API: {s}", .{msg});
     }
 
-    // Get version
-    const version_str = (root.get("version") orelse
-        errExit("ZLS API response missing 'version' field", .{})).string;
-    const zls_version = SemanticVersion.parse(version_str) orelse
-        errExit("ZLS API returned invalid version: {s}", .{version_str});
+    if (response.version.len == 0) {
+        errExit("ZLS API response missing 'version' field", .{});
+    }
 
-    // Get tarball URL for our platform
-    const platform_obj = root.get(arch_os) orelse
+    const zls_version = SemanticVersion.parse(response.version) orelse
+        errExit("ZLS API returned invalid version: {s}", .{response.version});
+
+    // Parse platform-specific tarball URL using dynamic parsing (key is runtime-known)
+    const dynamic = std.json.parseFromSlice(std.json.Value, arena, body, .{
+        .allocate = .alloc_if_needed,
+    }) catch |e| errExit("ZLS API JSON re-parse failed: {s}", .{@errorName(e)});
+    defer dynamic.deinit();
+
+    const platform_obj = dynamic.value.object.get(arch_os) orelse
         errExit("ZLS API has no build for platform {s}", .{arch_os});
     const tarball_url = (platform_obj.object.get("tarball") orelse
         errExit("ZLS API response missing 'tarball' field for {s}", .{arch_os})).string;

@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) !void {
 
     const ci_step = b.step("ci", "Build release artifacts for CI");
     ci_step.dependOn(b.getInstallStep());
+    ci_step.dependOn(test_step);
     ci_step.dependOn(&install_version_release_file.step);
 
     try ci(b, &release_version, release_version_embed, zig_mod, ci_step, host_zip_exe);
@@ -170,11 +171,15 @@ fn addTests(
     test_step: *std.Build.Step,
     opt: SharedTestOptions,
 ) void {
+    // Each test gets its own config directory to prevent cross-test
+    // contamination (e.g. set-verbosity writing files that other tests read).
+
     inline for (&.{ "-h", "--help" }) |flag| {
         const run = b.addRunArtifact(anyzig);
         run.setName(b.fmt("anyzig {s}", .{flag}));
         run.addArg(flag);
         run.addCheck(.{ .expect_stdout_match = "Usage: zig [command] [options]" });
+        run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         if (opt.make_build_steps) {
             b.step(b.fmt("test{s}", .{flag}), "").dependOn(&run.step);
         }
@@ -186,6 +191,7 @@ fn addTests(
         run.setName("anyzig -no-command");
         run.addArg("-no-command");
         run.expectStdErrEqual("error: expected a command but got '-no-command'\n");
+        run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         test_step.dependOn(&run.step);
     }
 
@@ -193,7 +199,10 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig init (no version)");
         run.addArg("init");
-        run.expectStdErrEqual("error: anyzig init requires a version, i.e. 'zig 0.13.0 init'\n");
+        run.expectStdErrEqual("error: anyzig init requires a version, you can:\n" ++
+            "  1. specify one explicitly: 'zig 0.13.0 init'\n" ++
+            "  2. set a default: 'zig any set-default VERSION'\n");
+        run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         test_step.dependOn(&run.step);
     }
 
@@ -201,8 +210,6 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig with no build.zig file");
         run.addArg("version");
-        // the most full-proof directory to avoid finding a build.zig...if
-        // this doesn't work, then no directory would work anyway
         run.setCwd(.{ .cwd_relative = switch (builtin.os.tag) {
             .windows => "C:/",
             else => "/",
@@ -210,6 +217,7 @@ fn addTests(
         run.addCheck(.{
             .expect_stderr_match = "no build.zig to pull a zig version from, you can:",
         });
+        run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         test_step.dependOn(&run.step);
     }
 
@@ -238,6 +246,7 @@ fn addTests(
         ) });
         t.run.addCheck(.{ .expect_stderr_match = "zig any version" });
         t.run.addCheck(.{ .expect_stderr_match = "zig any set-verbosity" });
+        t.run.addCheck(.{ .expect_stderr_match = "zig any show-default" });
     }
 
     {
@@ -541,6 +550,7 @@ const TestFactory = struct {
         const b = self.b;
         const run = b.addRunArtifact(self.wrap_exe);
         run.setName(args.name);
+        run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         switch (args.input_dir) {
             .no_input => run.addArg("--no-input"),
             .path => |p| run.addDirectoryArg(p),

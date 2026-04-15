@@ -122,6 +122,72 @@ pub fn allocReverseLookup(
     return map;
 }
 
+// ZLS compatibility mapping API
+// Stores version-string mappings with optional TTL support.
+// Uses the same hashstore directory and locking mechanism.
+const compat_ttl_seconds: i64 = 7 * 24 * 60 * 60; // 7 days
+
+pub fn saveCompat(hashstore_path: []const u8, name: []const u8, version_str: []const u8) !void {
+    var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var lock = try Lock.init(arena, hashstore_path, name);
+    defer lock.unlock();
+    const store_file = try std.fs.cwd().createFile(lock.hashfile_path, .{});
+    defer store_file.close();
+    const timestamp = std.time.timestamp();
+    try store_file.writer().print("{d}\n{s}\n", .{ timestamp, version_str });
+}
+
+pub const CompatResult = struct {
+    version_str: []const u8,
+    is_expired: bool,
+};
+
+pub fn findCompat(hashstore_path: []const u8, name: []const u8, arena: std.mem.Allocator) !?CompatResult {
+    var lock_arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer lock_arena_instance.deinit();
+    const lock_arena = lock_arena_instance.allocator();
+
+    var lock = try Lock.init(lock_arena, hashstore_path, name);
+    defer lock.unlock();
+
+    const full_content = blk: {
+        const file = std.fs.cwd().openFile(lock.hashfile_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| return e,
+        };
+        defer file.close();
+        break :blk try file.readToEndAlloc(arena, 1024);
+    };
+    const trimmed = std.mem.trim(u8, full_content, &std.ascii.whitespace);
+    // Format: "{timestamp}\n{version_str}"
+    if (std.mem.indexOfScalar(u8, trimmed, '\n')) |newline_pos| {
+        const timestamp_str = trimmed[0..newline_pos];
+        const version_str = trimmed[newline_pos + 1 ..];
+        const stored_timestamp = std.fmt.parseInt(i64, timestamp_str, 10) catch {
+            // Corrupted file, treat as not found
+            arena.free(full_content);
+            return null;
+        };
+        const now = std.time.timestamp();
+        const is_expired = (now - stored_timestamp) > compat_ttl_seconds;
+        return .{
+            .version_str = version_str,
+            .is_expired = is_expired,
+        };
+    }
+    // Legacy format (no timestamp) - treat as expired so it gets refreshed
+    return .{
+        .version_str = trimmed,
+        .is_expired = true,
+    };
+}
+
+pub fn deleteCompat(hashstore_path: []const u8, name: []const u8) !void {
+    return delete(hashstore_path, name);
+}
+
 pub fn oom(e: error{OutOfMemory}) noreturn {
     @panic(@errorName(e));
 }

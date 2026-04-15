@@ -5,7 +5,7 @@
 >
 > - **ZLS support**: Run `zls` via anyzig - auto-resolves compatible ZLS version for your Zig version
 > - **Default version**: `zig any set-default VERSION` for fallback when no `build.zig.zon` present
-> - **Version management**: `zig any list-installed` and `zig any remove VERSION`
+> - **Version management**: `zig any list-installed`, `zig any show-default`, and `zig any remove VERSION`
 
 A universal zig executable that lets you run any version of zig. Since you can only have one `zig` executable in your `PATH`, anyzig removes the limitation that this can only be one version. The version of zig to invoke is pulled from the `minimum_zig_version` field of `build.zig.zon`. `build.zig.zon` is found by searching the current or any parent directory.
 
