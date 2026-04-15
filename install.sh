@@ -4,7 +4,7 @@
 set -eu
 
 REPO="thuvasooriya/anyzig"
-BINARY_NAME="zig"
+BINARIES="zig zls"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 
 # flags
@@ -148,7 +148,7 @@ resolve_version() {
 # ---- install ----
 
 install_anyzig() {
-  local os arch tag archive_name download_url tmpdir archive dest
+  local os arch tag archive_name download_url tmpdir archive
 
   os="$(detect_os)"
   arch="$(detect_arch)"
@@ -169,28 +169,29 @@ install_anyzig() {
   verbose "extracting archive"
   tar -xzf "$archive" -C "$tmpdir"
 
-  # find the zig binary (may be at root or in a subdirectory)
-  local extracted_bin
-  extracted_bin="$(find "$tmpdir" -maxdepth 2 -name "$BINARY_NAME" -not -name "*.tar.gz" | head -1)"
-  if [ -z "$extracted_bin" ]; then
-    err "could not find '$BINARY_NAME' binary in extracted archive"
-  fi
-
   local install_dir="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-  dest="${install_dir}/${BINARY_NAME}"
-
   verbose "install dir: $install_dir"
   mkdir -p "$install_dir"
 
-  if [ -f "$dest" ] && [ "$FORCE" -eq 0 ]; then
-    verbose "backing up existing binary to ${dest}.bak"
-    cp "$dest" "${dest}.bak"
-  fi
+  for bin_name in $BINARIES; do
+    local extracted_bin dest
+    extracted_bin="$(find "$tmpdir" -maxdepth 2 -name "$bin_name" -not -name "*.tar.gz" | head -1)"
+    if [ -z "$extracted_bin" ]; then
+      warn "could not find '$bin_name' binary in archive (skipping)"
+      continue
+    fi
 
-  cp "$extracted_bin" "$dest"
-  chmod +x "$dest"
+    dest="${install_dir}/${bin_name}"
 
-  ok "installed to ${dest}"
+    if [ -f "$dest" ] && [ "$FORCE" -eq 0 ]; then
+      verbose "backing up existing $bin_name to ${dest}.bak"
+      cp "$dest" "${dest}.bak"
+    fi
+
+    cp "$extracted_bin" "$dest"
+    chmod +x "$dest"
+    ok "installed ${bin_name} to ${dest}"
+  done
 }
 
 # ---- PATH management ----
@@ -263,14 +264,20 @@ manage_path() {
 # ---- verify ----
 
 verify_install() {
-  local dest="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}/${BINARY_NAME}"
-  if ! "$dest" any version > /dev/null 2>&1; then
-    warn "verification failed: '$dest any version' did not succeed"
-    return
-  fi
-  local ver
-  ver="$("$dest" any version 2>/dev/null | head -1)"
-  ok "verified: $ver"
+  local install_dir="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+  for bin_name in $BINARIES; do
+    local dest="${install_dir}/${bin_name}"
+    if [ ! -f "$dest" ]; then
+      continue
+    fi
+    if ! "$dest" any version > /dev/null 2>&1; then
+      warn "verification failed: '$dest any version' did not succeed"
+      continue
+    fi
+    local ver
+    ver="$("$dest" any version 2>/dev/null | head -1)"
+    ok "verified ${bin_name}: ${ver}"
+  done
 }
 
 # ---- usage ----
@@ -278,6 +285,7 @@ verify_install() {
 usage() {
   cat <<EOF
 anyzig installer
+Installs both zig and zls binaries from the anyzig release archive.
 
 USAGE:
   install.sh [OPTIONS]
@@ -286,7 +294,7 @@ OPTIONS:
   -h, --help              show this help
   -v, --verbose           detailed output
   -q, --quiet             minimal output
-  --version VERSION       install specific release tag (e.g. v0.1.0)
+  --version VERSION       install specific release tag (e.g. v2026_04_15)
   --install-dir DIR       install directory (default: \$HOME/.local/bin)
   --no-modify-path        skip shell profile PATH modification
   --force                 reinstall even if already present
@@ -297,7 +305,7 @@ ENVIRONMENT:
 
 EXAMPLES:
   curl -LsSf https://raw.githubusercontent.com/thuvasooriya/anyzig/main/install.sh | sh
-  curl -LsSf .../install.sh | sh -s -- --version v0.2.0
+  curl -LsSf .../install.sh | sh -s -- --version v2026_04_15
   ANYZIG_INSTALL_DIR=/usr/local/bin sh install.sh
 EOF
 }
@@ -344,7 +352,7 @@ main() {
   verify_install
 
   info ""
-  info "run '${BOLD}zig any help${RESET}' to get started"
+  info "run '${BOLD}zig any help${RESET}' or '${BOLD}zls any help${RESET}' to get started"
 }
 
 main "$@"

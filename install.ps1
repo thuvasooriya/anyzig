@@ -4,15 +4,15 @@
 
 .DESCRIPTION
     Downloads the latest (or specified) release of anyzig from GitHub and installs
-    it to a local bin directory, optionally adding it to the user PATH.
-    The installed zig.exe binary intercepts all zig invocations and dispatches to
-    the correct Zig version based on build.zig.zon or explicit version arguments.
+    both zig.exe and zls.exe to a local bin directory, optionally adding it to the
+    user PATH. The installed binaries intercept all zig/zls invocations and dispatch
+    to the correct version based on build.zig.zon or explicit version arguments.
 
 .PARAMETER Version
-    A specific release version to install (e.g. "v0.1.0"). Defaults to latest.
+    A specific release version to install (e.g. "v2026_04_15"). Defaults to latest.
 
 .PARAMETER InstallDir
-    Directory to install zig.exe into. Defaults to $HOME\.local\bin or
+    Directory to install zig.exe and zls.exe into. Defaults to $HOME\.local\bin or
     the value of the ANYZIG_INSTALL_DIR environment variable.
 
 .PARAMETER NoModifyPath
@@ -246,7 +246,7 @@ try {
     }
 
     # Backup existing files
-    foreach ($name in @("zig.exe", "zig.pdb")) {
+    foreach ($name in @("zig.exe", "zig.pdb", "zls.exe", "zls.pdb")) {
         $dest = Join-Path $InstallDir $name
         if (Test-Path $dest) {
             $backup = "$dest.bak"
@@ -255,7 +255,7 @@ try {
         }
     }
 
-    # Copy files
+    # Copy zig files
     Copy-Item (Join-Path $src_dir "zig.exe") $InstallDir -Force
     Write-Done "installed zig.exe"
 
@@ -265,6 +265,21 @@ try {
         Write-Done "installed zig.pdb"
     }
 
+    # Copy zls files
+    $zls_src = Join-Path $src_dir "zls.exe"
+    if (Test-Path $zls_src) {
+        Copy-Item $zls_src $InstallDir -Force
+        Write-Done "installed zls.exe"
+
+        $zls_pdb_src = Join-Path $src_dir "zls.pdb"
+        if (Test-Path $zls_pdb_src) {
+            Copy-Item $zls_pdb_src $InstallDir -Force
+            Write-Done "installed zls.pdb"
+        }
+    } else {
+        Write-Step "zls.exe not found in archive (skipping)"
+    }
+
     # PATH management
     if (-not $NoModifyPath) {
         Add-ToUserPath $InstallDir
@@ -272,12 +287,15 @@ try {
 
     # Verify
     Write-Step "verifying installation..."
-    $exe = Join-Path $InstallDir "zig.exe"
-    try {
-        $ver_out = & "$exe" any version 2>&1
-        Write-Done "verified: $ver_out"
-    } catch {
-        Write-Warning "installed but could not verify: $_"
+    foreach ($bin_name in @("zig", "zls")) {
+        $exe = Join-Path $InstallDir "$bin_name.exe"
+        if (-not (Test-Path $exe)) { continue }
+        try {
+            $ver_out = & "$exe" any version 2>&1
+            Write-Done "verified ${bin_name}: $ver_out"
+        } catch {
+            Write-Warning "installed $bin_name but could not verify: $_"
+        }
     }
 
 } finally {
@@ -288,6 +306,6 @@ try {
 }
 
 Write-Information ""
-Write-Information "  anyzig $tag installed successfully."
-Write-Information "  Run 'zig any help' to get started."
+Write-Information "  anyzig $tag installed successfully (zig + zls)."
+Write-Information "  Run 'zig any help' or 'zls any help' to get started."
 Write-Information ""
