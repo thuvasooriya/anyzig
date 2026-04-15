@@ -32,6 +32,22 @@ pub fn build(b: *std.Build) !void {
     });
 
     const options = b.addOptions();
+    options.addOption(bool, "enable_debug_extensions", false);
+    options.addOption(bool, "have_llvm", false);
+    options.addOption(bool, "enable_logging", false);
+    options.addOption(bool, "enable_tracy", false);
+    options.addOption(bool, "enable_tracy_allocation", false);
+    options.addOption(bool, "enable_tracy_callstack", false);
+    options.addOption(bool, "enable_link_snapshots", false);
+    options.addOption(bool, "skip_non_native", false);
+    options.addOption(bool, "debug_gpa", false);
+    options.addOption(bool, "llvm_has_xtensa", false);
+    options.addOption(bool, "llvm_has_m68k", false);
+    options.addOption(bool, "llvm_has_csky", false);
+    options.addOption(bool, "llvm_has_arc", false);
+    options.addOption(u8, "mem_leak_frames", 0);
+    options.addOption(u8, "tracy_callstack_depth", 0);
+    options.addOption([]const u8, "version", "0.15.2");
     zig_mod.addOptions("build_options", options);
 
     const target = b.standardTargetOptions(.{});
@@ -96,9 +112,11 @@ pub fn build(b: *std.Build) !void {
 
     const host_zip_exe = b.addExecutable(.{
         .name = "zip",
-        .root_source_file = zip_dep.path("src/zip.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
+        .root_module = b.createModule(.{
+            .root_source_file = zip_dep.path("src/zip.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
     });
 
     const ci_step = b.step("ci", "Build release artifacts for CI");
@@ -199,9 +217,11 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig init (no version)");
         run.addArg("init");
-        run.expectStdErrEqual("error: anyzig init requires a version, you can:\n" ++
-            "  1. specify one explicitly: 'zig 0.13.0 init'\n" ++
-            "  2. set a default: 'zig any set-default VERSION'\n");
+        // With builtin default version, init falls back to the default
+        // instead of erroring. Check that it uses the default.
+        run.addCheck(.{
+            .expect_stderr_match = "using built-in default version",
+        });
         run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         test_step.dependOn(&run.step);
     }
@@ -214,8 +234,10 @@ fn addTests(
             .windows => "C:/",
             else => "/",
         } });
+        // With builtin default version, commands fall back to the default
+        // instead of erroring when no build.zig is found.
         run.addCheck(.{
-            .expect_stderr_match = "no build.zig to pull a zig version from, you can:",
+            .expect_stderr_match = "using built-in default version",
         });
         run.setEnvironmentVariable("ANYZIG_CONFIG_DIR", b.makeTempPath());
         test_step.dependOn(&run.step);
@@ -227,8 +249,10 @@ fn addTests(
         .anyzig = anyzig,
         .wrap_exe = b.addExecutable(.{
             .name = "wrap",
-            .root_source_file = b.path("test/wrap.zig"),
-            .target = b.graph.host,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/wrap.zig"),
+                .target = b.graph.host,
+            }),
         }),
         .make_build_steps = opt.make_build_steps,
     };

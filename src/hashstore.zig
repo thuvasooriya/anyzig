@@ -70,7 +70,7 @@ pub fn save(hashstore_path: []const u8, name: []const u8, content: []const u8) !
     // no need to write to a temporary file and rename since we have a lock file
     const store_file = try std.fs.cwd().createFile(lock.hashfile_path, .{});
     defer store_file.close();
-    try store_file.writer().writeAll(content);
+    try store_file.deprecatedWriter().writeAll(content);
 }
 
 pub fn delete(hashstore_path: []const u8, name: []const u8) !void {
@@ -136,7 +136,7 @@ pub fn saveCompat(hashstore_path: []const u8, name: []const u8, version_str: []c
     const store_file = try std.fs.cwd().createFile(lock.hashfile_path, .{});
     defer store_file.close();
     const timestamp = std.time.timestamp();
-    try store_file.writer().print("{d}\n{s}\n", .{ timestamp, version_str });
+    try store_file.deprecatedWriter().print("{d}\n{s}\n", .{ timestamp, version_str });
 }
 
 pub const CompatResult = struct {
