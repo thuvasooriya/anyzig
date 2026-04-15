@@ -939,7 +939,7 @@ const DownloadIndexKind = enum {
     pub fn url(self: DownloadIndexKind) []const u8 {
         return switch (self) {
             .official => "https://ziglang.org/download/index.json",
-            .mach => "https://machengine.org/zig/index.json",
+            .mach => "https://pkg.hexops.org/zig/index.json",
         };
     }
     pub fn uri(self: DownloadIndexKind) std.Uri {
@@ -1146,11 +1146,17 @@ fn getVersionUrl(
         if (zls_compat_info) |info| {
             return DownloadUrl.initOfficial(arena.dupe(u8, info.tarball_url) catch |e| oom(e));
         }
-        // Fallback: construct URL (for cached versions)
+        // Fallback: construct URL with version-aware arch/os ordering
         return DownloadUrl.initOfficial(std.fmt.allocPrint(
             arena,
             "https://builds.zigtools.org/zls-{s}-{}.{s}",
-            .{ arch_os, semantic_version, archive_ext },
+            .{ switch (determineVersionKind(semantic_version)) {
+                .dev => arch_os,
+                .release => |release| switch (release.order(arch_os_swap_release)) {
+                    .lt => os_arch,
+                    .gt, .eq => arch_os,
+                },
+            }, semantic_version, archive_ext },
         ) catch |e| oom(e));
     }
 
