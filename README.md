@@ -22,9 +22,62 @@ Anyzig also adds a few of its own commands, which can be queried and invoked wit
 
 # Install
 
-Go to https://marler8997.github.io/anyzig and select your OS/Arch to get a download link and/or instructions to install via the command-line.
+## Quick install (recommended)
 
-Otherwise, you can manually find and download/extract the applicable archive from Releases. It will contain a single static binary named `zig`, unless you're on Windows in which case it's 2 files, `zig.exe` and `zig.pdb`.
+**macOS / Linux:**
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/thuvasooriya/anyzig/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/thuvasooriya/anyzig/main/install.ps1 | iex"
+```
+
+Both scripts will:
+- Detect your platform and architecture automatically
+- Download the latest release from GitHub
+- Install the `zig` binary to `~/.local/bin`
+- Add the install directory to your PATH (if needed)
+
+### Options
+
+The shell script accepts flags:
+
+```sh
+# install a specific version
+curl -LsSf .../install.sh | sh -s -- --version v2026_03_26
+
+# custom install directory
+curl -LsSf .../install.sh | sh -s -- --install-dir /usr/local/bin
+
+# quiet mode, skip PATH modification
+curl -LsSf .../install.sh | sh -s -- --quiet --no-modify-path
+```
+
+The PowerShell script accepts parameters:
+
+```powershell
+.\install.ps1 -Version v2026_03_26 -InstallDir C:\tools\bin -NoModifyPath
+```
+
+Environment variables `ANYZIG_VERSION` and `ANYZIG_INSTALL_DIR` are also supported on both platforms.
+
+## Manual install
+
+Go to https://marler8997.github.io/anyzig and select your OS/Arch to get a download link, or manually download the applicable archive from [Releases](https://github.com/thuvasooriya/anyzig/releases). It will contain a single static binary named `zig`, unless you're on Windows in which case it's 2 files, `zig.exe` and `zig.pdb`.
+
+## Default Zig version
+
+When no `build.zig.zon` is found and no explicit version is given, anyzig uses a built-in default of `0.16.0`. You can override this with:
+
+```sh
+zig any set-default 0.14.0   # set your own default
+zig any show-default          # show current default
+zig any unset-default         # remove override (reverts to built-in 0.16.0)
+```
 
 # Mach Versions and Download Mirror
 

@@ -114,6 +114,7 @@ fn readVerbosityFile() union(enum) {
 }
 
 const default_version_filename = "default-" ++ exe_str ++ "-version";
+const builtin_default_version = "0.16.0";
 
 fn readDefaultVersionFile() ?VersionSpecifier {
     const app_data_dir = global.getAppDataDir() catch return null;
@@ -399,13 +400,9 @@ pub fn main() !void {
                     log.info("using default version from config for init", .{});
                     break :blk .{ default_version, !is_help };
                 }
-                try std.io.getStdErr().writer().print(
-                    "error: anyzig init requires a version, you can:\n" ++
-                        "  1. specify one explicitly: '" ++ exe_str ++ " 0.13.0 {s}'\n" ++
-                        "  2. set a default: '" ++ exe_str ++ " any set-default VERSION'\n",
-                    .{command},
-                );
-                std.process.exit(0xff);
+                // Fall back to built-in default version for init
+                log.info("using built-in default version " ++ builtin_default_version ++ " for init", .{});
+                break :blk .{ .{ .semantic = SemanticVersion.parse(builtin_default_version).? }, !is_help };
             }
             if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1));
         }
@@ -417,13 +414,9 @@ pub fn main() !void {
             log.info("using default version from config", .{});
             break :blk .{ default_version, false };
         }
-        try std.io.getStdErr().writeAll(
-            "no build.zig to pull a zig version from, you can:\n" ++
-                "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
-                "  2. run from a directory where a build.zig can be found\n" ++
-                "  3. run '" ++ exe_str ++ " any set-default VERSION' to set a default version\n",
-        );
-        std.process.exit(0xff);
+        // Fall back to built-in default version
+        log.info("using built-in default version " ++ builtin_default_version, .{});
+        break :blk .{ .{ .semantic = SemanticVersion.parse(builtin_default_version).? }, false };
     };
 
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
@@ -718,7 +711,7 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
                 .semantic => |v| try std.io.getStdOut().writer().print("{}\n", .{v}),
             }
         } else {
-            try std.io.getStdOut().writeAll("no default version set\n");
+            try std.io.getStdOut().writeAll("no default version set (built-in: " ++ builtin_default_version ++ ")\n");
         }
         return 0;
     } else if (std.mem.eql(u8, command, "remove")) {
